@@ -61,13 +61,29 @@ def stretch(
 
 
 def _normalize_to_01(data: NDArray[np.floating]) -> NDArray[np.floating]:
-    """Normalize raw FITS data to [0, 1] range."""
+    """Normalize raw FITS data to [0, 1] range.
+
+    For RGB images, normalizes each channel independently using percentile
+    clipping to avoid hot pixels/bright stars from compressing the useful range.
+    """
     result = data.astype(np.float64)
-    vmin = np.nanmin(result)
-    vmax = np.nanmax(result)
+
+    if result.ndim == 3:
+        for i in range(result.shape[2]):
+            ch = result[:, :, i]
+            vmin = float(np.nanpercentile(ch, 0.1))
+            vmax = float(np.nanpercentile(ch, 99.99))
+            if vmax - vmin > 0:
+                result[:, :, i] = np.clip((ch - vmin) / (vmax - vmin), 0, 1)
+            else:
+                result[:, :, i] = 0
+        return result
+
+    vmin = float(np.nanpercentile(result, 0.1))
+    vmax = float(np.nanpercentile(result, 99.99))
     if vmax - vmin == 0:
         return np.zeros_like(result)
-    return (result - vmin) / (vmax - vmin)
+    return np.clip((result - vmin) / (vmax - vmin), 0, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -110,39 +126,70 @@ def _stretch_mtf(
     else:
         channels = [result[:, :, i] for i in range(result.shape[2])]
 
-    # For linked mode, compute statistics from combined channels
+    # For linked mode: neutralize per-channel backgrounds then apply same stretch.
+    # Steps:
+    # 1. Compute each channel's background (median) and noise (MAD)
+    # 2. Subtract backgrounds to neutralize sky color
+    # 3. Rescale so all channels have the same range
+    # 4. Apply shared MTF stretch
     if linked and len(channels) > 1:
-        all_valid = np.concatenate([ch.ravel() for ch in channels])
-        all_valid = all_valid[(all_valid > 0.0) & (all_valid < 1.0)]
+        # Step 1: Per-channel statistics
+        medians = []
+        mads = []
+        for channel in channels:
+            flat = channel.ravel()
+            valid = flat[flat > 0.0]
+            if len(valid) == 0:
+                medians.append(0.0)
+                mads.append(0.01)
+                continue
+            med = float(np.median(valid))
+            mad = float(np.median(np.abs(valid - med)))
+            medians.append(med)
+            mads.append(max(mad, 1e-6))
 
-        if len(all_valid) > 0:
-            median = np.median(all_valid)
-            mad = np.median(np.abs(all_valid - median))
-            shadow_clip = max(0.0, median - sigma * mad * 1.4826)
-            highlight_clip = 1.0
-            median_norm = (median - shadow_clip) / (highlight_clip - shadow_clip)
+        # Step 2: Background neutralization
+        # Subtract each channel's shadow clip point (background)
+        shadows = [max(0.0, med - sigma * mad * 1.4826) for med, mad in zip(medians, mads)]
 
-            if 0 < median_norm < 1 and bg_percent > 0:
+        # Use the minimum shadow so we don't clip any channel too aggressively
+        ref_shadow = min(shadows)
+
+        # Step 3: Apply shadow subtraction and normalize
+        processed = []
+        for i, channel in enumerate(channels):
+            # Subtract this channel's background
+            stretched = channel - shadows[i]
+            # Scale relative to the reference channel's range
+            # so all channels have comparable brightness above background
+            scale = (1.0 - ref_shadow) / max(1.0 - shadows[i], 1e-6)
+            stretched = stretched * scale
+            stretched = np.clip(stretched, 0, 1)
+            processed.append(stretched)
+
+        # Step 4: Compute shared MTF from the reference channel (green)
+        ref_idx = min(1, len(processed) - 1)
+        ref_flat = processed[ref_idx].ravel()
+        ref_valid = ref_flat[ref_flat > 0.0]
+
+        if len(ref_valid) > 0:
+            ref_median = float(np.median(ref_valid))
+            if 0 < ref_median < 1 and bg_percent > 0:
                 midtone = (
-                    median_norm
+                    ref_median
                     * (bg_percent - 1.0)
-                    / (2.0 * bg_percent * median_norm - bg_percent - median_norm)
+                    / (2.0 * bg_percent * ref_median - bg_percent - ref_median)
                 )
                 midtone = float(np.clip(midtone, 0.01, 0.99))
             else:
                 midtone = 0.5
+        else:
+            midtone = 0.5
 
-            processed = []
-            for channel in channels:
-                stretched = np.clip(channel, shadow_clip, highlight_clip)
-                if highlight_clip - shadow_clip > 0:
-                    stretched = (stretched - shadow_clip) / (highlight_clip - shadow_clip)
-                stretched = _mtf(midtone, stretched)
-                processed.append(stretched)
-
-            for i, ch in enumerate(processed):
-                result[:, :, i] = ch
-            return result
+        for i in range(len(processed)):
+            processed[i] = _mtf(midtone, processed[i])
+            result[:, :, i] = processed[i]
+        return result
 
     # Unlinked mode (or grayscale): process each channel independently
     processed = []

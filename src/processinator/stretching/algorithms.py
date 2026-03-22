@@ -91,6 +91,7 @@ def _stretch_mtf(
     data: NDArray[np.floating],
     bg_percent: float = 0.15,
     sigma: float = 3.0,
+    linked: bool = True,
 ) -> NDArray[np.floating]:
     """MTF stretch using background/sigma clipping.
 
@@ -98,6 +99,8 @@ def _stretch_mtf(
         data: Normalized [0, 1] image data.
         bg_percent: Target background level (0-1). Default 0.15.
         sigma: Number of sigma above background for shadow clipping. Default 3.0.
+        linked: If True, use the same stretch parameters for all channels
+                to preserve color balance. Default True.
     """
     result = data.copy()
 
@@ -107,6 +110,41 @@ def _stretch_mtf(
     else:
         channels = [result[:, :, i] for i in range(result.shape[2])]
 
+    # For linked mode, compute statistics from combined channels
+    if linked and len(channels) > 1:
+        all_valid = np.concatenate([ch.ravel() for ch in channels])
+        all_valid = all_valid[(all_valid > 0.0) & (all_valid < 1.0)]
+
+        if len(all_valid) > 0:
+            median = np.median(all_valid)
+            mad = np.median(np.abs(all_valid - median))
+            shadow_clip = max(0.0, median - sigma * mad * 1.4826)
+            highlight_clip = 1.0
+            median_norm = (median - shadow_clip) / (highlight_clip - shadow_clip)
+
+            if 0 < median_norm < 1 and bg_percent > 0:
+                midtone = (
+                    median_norm
+                    * (bg_percent - 1.0)
+                    / (2.0 * bg_percent * median_norm - bg_percent - median_norm)
+                )
+                midtone = float(np.clip(midtone, 0.01, 0.99))
+            else:
+                midtone = 0.5
+
+            processed = []
+            for channel in channels:
+                stretched = np.clip(channel, shadow_clip, highlight_clip)
+                if highlight_clip - shadow_clip > 0:
+                    stretched = (stretched - shadow_clip) / (highlight_clip - shadow_clip)
+                stretched = _mtf(midtone, stretched)
+                processed.append(stretched)
+
+            for i, ch in enumerate(processed):
+                result[:, :, i] = ch
+            return result
+
+    # Unlinked mode (or grayscale): process each channel independently
     processed = []
     for channel in channels:
         flat = channel.ravel()
@@ -135,7 +173,7 @@ def _stretch_mtf(
                 * (bg_percent - 1.0)
                 / (2.0 * bg_percent * median_norm - bg_percent - median_norm)
             )
-            midtone = np.clip(midtone, 0.01, 0.99)
+            midtone = float(np.clip(midtone, 0.01, 0.99))
         else:
             midtone = 0.5
 

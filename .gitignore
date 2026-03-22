@@ -12,3 +12,6 @@ wheels/
 
 .envrc
 .env
+
+cc.txt
+logs/*

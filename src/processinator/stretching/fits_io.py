@@ -67,6 +67,8 @@ def fits_to_image(
     output_path: str | Path | None = None,
     algorithm: StretchAlgorithm = StretchAlgorithm.MTF,
     output_format: str = "PNG",
+    remove_gradient: bool = False,
+    gradient_order: int = 2,
     **stretch_kwargs: float,
 ) -> Image.Image:
     """Read a FITS file, apply stretching, and produce a displayable image.
@@ -76,13 +78,27 @@ def fits_to_image(
         output_path: If provided, save the image to this path.
         algorithm: Stretch algorithm to use.
         output_format: Image format for saving ("PNG" or "JPEG").
+        remove_gradient: If True, remove background gradient before stretching.
+        gradient_order: Polynomial order for gradient model (1-3). Default 2.
         **stretch_kwargs: Passed through to the stretch algorithm.
 
     Returns:
         PIL Image object.
     """
+    from processinator.pipeline import PipelineConfig, process
+
     data, _header = read_fits(fits_path)
-    stretched = stretch(data, algorithm=algorithm, **stretch_kwargs)
+
+    if remove_gradient:
+        config = PipelineConfig(
+            gradient_removal=True,
+            gradient_order=gradient_order,
+            stretch_algorithm=algorithm,
+            stretch_kwargs=stretch_kwargs,
+        )
+        stretched = process(data, config)
+    else:
+        stretched = stretch(data, algorithm=algorithm, **stretch_kwargs)
 
     # Convert to 8-bit
     img_8bit = (stretched * 255.0).clip(0, 255).astype(np.uint8)

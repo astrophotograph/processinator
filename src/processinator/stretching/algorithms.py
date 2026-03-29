@@ -37,6 +37,7 @@ class StretchAlgorithm(Enum):
 def stretch(
     data: NDArray[np.floating],
     algorithm: StretchAlgorithm = StretchAlgorithm.MTF,
+    autocrop: bool = True,
     **kwargs: float,
 ) -> NDArray[np.floating]:
     """Stretch image data from linear to nonlinear for display.
@@ -45,12 +46,32 @@ def stretch(
         data: Image array, shape (H, W) or (H, W, 3). Values should be in
             their original FITS range (not pre-normalized).
         algorithm: Which stretch algorithm to use.
+        autocrop: If True, detect and crop dark stacking edges before
+            stretching. The output size may be smaller than the input.
+            Default True.
         **kwargs: Algorithm-specific parameters (see individual functions).
 
     Returns:
-        Stretched image normalized to [0.0, 1.0], same shape as input.
+        Stretched image normalized to [0.0, 1.0]. May be smaller than
+        input if autocrop removed dark edges.
     """
-    normalized = _normalize_to_01(data)
+    # If autocrop is enabled, detect dark stacking edges and use only the
+    # interior for computing normalization and stretch statistics. The output
+    # keeps the full frame so pixel coordinates stay aligned with the FITS.
+    stats_data = data
+    if autocrop:
+        from processinator.autocrop import autocrop as do_autocrop
+        cropped, crop_info = do_autocrop(data)
+        if any(v > 0 for v in crop_info):
+            import logging
+            logging.getLogger(__name__).info(
+                "autocrop: using interior (excluding edges top=%d bottom=%d left=%d right=%d) for stretch stats",
+                *crop_info,
+            )
+            stats_data = cropped
+
+    # Normalize the full image, but compute percentiles from the cropped interior
+    normalized = _normalize_to_01_with_stats(data, stats_data)
 
     match algorithm:
         case StretchAlgorithm.MTF:
@@ -66,7 +87,18 @@ def stretch(
 
 
 def _normalize_to_01(data: NDArray[np.floating]) -> NDArray[np.floating]:
+    """Normalize raw FITS data to [0, 1] range."""
+    return _normalize_to_01_with_stats(data, data)
+
+
+def _normalize_to_01_with_stats(
+    data: NDArray[np.floating],
+    stats_data: NDArray[np.floating],
+) -> NDArray[np.floating]:
     """Normalize raw FITS data to [0, 1] range.
+
+    Computes percentiles from stats_data (which may be a cropped interior)
+    but applies the normalization to the full data array.
 
     For RGB images, normalizes each channel independently using percentile
     clipping to avoid hot pixels/bright stars from compressing the useful range.
@@ -76,9 +108,9 @@ def _normalize_to_01(data: NDArray[np.floating]) -> NDArray[np.floating]:
     if result.ndim == 3:
         for i in range(result.shape[2]):
             ch = result[:, :, i]
-            # nanpercentile stays on numpy (JAX doesn't support it)
-            vmin = float(np.nanpercentile(ch, 0.1))
-            vmax = float(np.nanpercentile(ch, 99.99))
+            stats_ch = stats_data[:, :, i] if stats_data.ndim == 3 else stats_data
+            vmin = float(np.nanpercentile(stats_ch, 0.1))
+            vmax = float(np.nanpercentile(stats_ch, 99.99))
             if vmax - vmin > 0:
                 ch_gpu = from_numpy(ch)
                 result[:, :, i] = to_numpy(xp.clip((ch_gpu - vmin) / (vmax - vmin), 0, 1))
@@ -86,8 +118,8 @@ def _normalize_to_01(data: NDArray[np.floating]) -> NDArray[np.floating]:
                 result[:, :, i] = 0
         return result
 
-    vmin = float(np.nanpercentile(result, 0.1))
-    vmax = float(np.nanpercentile(result, 99.99))
+    vmin = float(np.nanpercentile(stats_data, 0.1))
+    vmax = float(np.nanpercentile(stats_data, 99.99))
     if vmax - vmin == 0:
         return np.zeros_like(result)
     r = from_numpy(result)

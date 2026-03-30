@@ -107,14 +107,25 @@ def _remove_gradient_channel(
     except np.linalg.LinAlgError:
         return channel
 
-    # Evaluate the model over the full image
-    full_y, full_x = np.mgrid[0:h, 0:w]
-    fyn = (full_y.astype(np.float64) / max(h - 1, 1)) * 2 - 1
-    fxn = (full_x.astype(np.float64) / max(w - 1, 1)) * 2 - 1
+    # Evaluate the model at reduced resolution, then upsample.
+    # A low-order polynomial is smooth — no need to evaluate at every pixel.
+    eval_size = min(256, h, w)
+    ey = np.linspace(-1, 1, eval_size)
+    ex = np.linspace(-1, 1, eval_size)
+    eyn, exn = np.meshgrid(ey, ex, indexing="ij")
 
-    full_terms = _poly_terms(fxn.ravel(), fyn.ravel(), order)
-    full_design = np.column_stack(full_terms)
-    model = (full_design @ coeffs).reshape(h, w)
+    eval_terms = _poly_terms(exn.ravel(), eyn.ravel(), order)
+    eval_design = np.column_stack(eval_terms)
+    small_model = (eval_design @ coeffs).reshape(eval_size, eval_size)
+
+    # Upsample to full resolution with bilinear interpolation
+    if eval_size < h or eval_size < w:
+        from PIL import Image as PILImage
+
+        model_img = PILImage.fromarray(small_model.astype(np.float64))
+        model = np.array(model_img.resize((w, h), PILImage.BILINEAR), dtype=np.float64)
+    else:
+        model = small_model
 
     # Subtract model, shift so minimum background is near zero
     result = channel - model

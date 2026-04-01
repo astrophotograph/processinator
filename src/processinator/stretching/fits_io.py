@@ -69,6 +69,8 @@ def fits_to_image(
     output_format: str = "PNG",
     remove_gradient: bool = False,
     gradient_order: int = 2,
+    denoise: bool = False,
+    denoise_threshold: float = 3.0,
     **stretch_kwargs: float,
 ) -> Image.Image:
     """Read a FITS file, apply stretching, and produce a displayable image.
@@ -80,6 +82,8 @@ def fits_to_image(
         output_format: Image format for saving ("PNG" or "JPEG").
         remove_gradient: If True, remove background gradient before stretching.
         gradient_order: Polynomial order for gradient model (1-3). Default 2.
+        denoise: If True, apply starlet wavelet denoising before stretching.
+        denoise_threshold: Denoise threshold in noise sigmas. Default 3.0.
         **stretch_kwargs: Passed through to the stretch algorithm.
 
     Returns:
@@ -89,10 +93,12 @@ def fits_to_image(
 
     data, _header = read_fits(fits_path)
 
-    if remove_gradient:
+    if remove_gradient or denoise:
         config = PipelineConfig(
-            gradient_removal=True,
+            gradient_removal=remove_gradient,
             gradient_order=gradient_order,
+            denoise=denoise,
+            denoise_threshold=denoise_threshold,
             stretch_algorithm=algorithm,
             stretch_kwargs=stretch_kwargs,
         )

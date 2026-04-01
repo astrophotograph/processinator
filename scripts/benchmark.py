@@ -3,8 +3,10 @@
 
 Usage:
     uv run python scripts/benchmark.py <fits_file>
+    uv run python scripts/benchmark.py --synthetic          # no FITS file needed
     uv run python scripts/benchmark.py <fits_file> --no-gradient
     uv run python scripts/benchmark.py <fits_file> --algorithm arcsinh
+    uv run python scripts/benchmark.py --synthetic --denoise
 """
 
 import sys
@@ -13,12 +15,16 @@ import time
 import numpy as np
 
 
-def benchmark(fits_path: str, algorithm: str = "mtf", gradient: bool = True):
+def benchmark(
+    fits_path: str,
+    algorithm: str = "mtf",
+    gradient: bool = True,
+    denoise_step: bool = False,
+):
     from processinator import read_fits
     from processinator.autocrop import autocrop
     from processinator.gradient import remove_gradient
     from processinator.stretching.algorithms import (
-        StretchAlgorithm,
         _normalize_to_01,
         _normalize_to_01_with_stats,
         _stretch_arcsinh,
@@ -35,13 +41,26 @@ def benchmark(fits_path: str, algorithm: str = "mtf", gradient: bool = True):
 
     steps = []
 
-    # 1. Read FITS
+    # 1. Read FITS (or generate a synthetic frame of typical camera size)
     t0 = time.perf_counter()
-    data, _header = read_fits(fits_path)
+    if fits_path == "synthetic":
+        from processinator.synthetic import make_test_image
+
+        data = make_test_image(
+            (3000, 4000),
+            rgb=True,
+            n_stars=800,
+            gradient_amplitude=300.0,
+            nebula_amplitude=200.0,
+            dark_edges=(30, 20, 40, 0),
+            seed=1,
+        ).data
+    else:
+        data, _header = read_fits(fits_path)
     elapsed = time.perf_counter() - t0
     steps.append(("Read FITS", elapsed))
     size_mb = data.nbytes / 1e6
-    print(f"  Read FITS:        {elapsed*1000:7.0f} ms  ({data.shape}, {size_mb:.0f} MB)")
+    print(f"  Read/generate:    {elapsed*1000:7.0f} ms  ({data.shape}, {size_mb:.0f} MB)")
 
     # 2. Autocrop detection
     t0 = time.perf_counter()
@@ -70,7 +89,17 @@ def benchmark(fits_path: str, algorithm: str = "mtf", gradient: bool = True):
         print(f"  Gradient removal: {elapsed*1000:7.0f} ms")
     else:
         work = normalized
-        print(f"  Gradient removal:    skip")
+        print("  Gradient removal:    skip")
+
+    # 4b. Denoise (optional)
+    if denoise_step:
+        from processinator.denoise import denoise
+
+        t0 = time.perf_counter()
+        work = denoise(work)
+        elapsed = time.perf_counter() - t0
+        steps.append(("Denoise", elapsed))
+        print(f"  Denoise:          {elapsed*1000:7.0f} ms")
 
     # 5. Stretch
     stretch_funcs = {
@@ -117,20 +146,26 @@ def benchmark(fits_path: str, algorithm: str = "mtf", gradient: bool = True):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: benchmark.py <fits_file> [--no-gradient] [--algorithm name]")
+        print(
+            "Usage: benchmark.py <fits_file>|--synthetic "
+            "[--no-gradient] [--denoise] [--algorithm name]"
+        )
         sys.exit(1)
 
-    fits_path = sys.argv[1]
+    fits_path = "synthetic" if sys.argv[1] == "--synthetic" else sys.argv[1]
     algorithm = "mtf"
     gradient = True
+    denoise_step = False
 
     for i, arg in enumerate(sys.argv[2:], 2):
         if arg == "--no-gradient":
             gradient = False
+        elif arg == "--denoise":
+            denoise_step = True
         elif arg == "--algorithm" and i + 1 < len(sys.argv):
             algorithm = sys.argv[i + 1]
 
-    benchmark(fits_path, algorithm=algorithm, gradient=gradient)
+    benchmark(fits_path, algorithm=algorithm, gradient=gradient, denoise_step=denoise_step)
 
 
 if __name__ == "__main__":

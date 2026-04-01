@@ -38,40 +38,48 @@ def stretch(
     data: NDArray[np.floating],
     algorithm: StretchAlgorithm = StretchAlgorithm.MTF,
     autocrop: bool = True,
+    pre_normalized: bool = False,
     **kwargs: float,
 ) -> NDArray[np.floating]:
     """Stretch image data from linear to nonlinear for display.
 
     Args:
         data: Image array, shape (H, W) or (H, W, 3). Values should be in
-            their original FITS range (not pre-normalized).
+            their original FITS range unless pre_normalized is True.
         algorithm: Which stretch algorithm to use.
-        autocrop: If True, detect and crop dark stacking edges before
-            stretching. The output size may be smaller than the input.
+        autocrop: If True, detect dark stacking edges and exclude them from
+            the normalization statistics. The output keeps the full frame
+            (nothing is cropped away). Ignored when pre_normalized is True.
             Default True.
+        pre_normalized: If True, data is already normalized to [0, 1] and
+            the internal normalization pass is skipped (used by the
+            pipeline to avoid redundant work). Default False.
         **kwargs: Algorithm-specific parameters (see individual functions).
 
     Returns:
-        Stretched image normalized to [0.0, 1.0]. May be smaller than
-        input if autocrop removed dark edges.
+        Stretched image normalized to [0.0, 1.0], same shape as the input.
     """
-    # If autocrop is enabled, detect dark stacking edges and use only the
-    # interior for computing normalization and stretch statistics. The output
-    # keeps the full frame so pixel coordinates stay aligned with the FITS.
-    stats_data = data
-    if autocrop:
-        from processinator.autocrop import autocrop as do_autocrop
-        cropped, crop_info = do_autocrop(data)
-        if any(v > 0 for v in crop_info):
-            import logging
-            logging.getLogger(__name__).info(
-                "autocrop: using interior (excluding edges top=%d bottom=%d left=%d right=%d) for stretch stats",
-                *crop_info,
-            )
-            stats_data = cropped
+    if pre_normalized:
+        normalized = data.astype(np.float64, copy=False)
+    else:
+        # If autocrop is enabled, detect dark stacking edges and use only the
+        # interior for computing normalization statistics. The output keeps
+        # the full frame so pixel coordinates stay aligned with the FITS.
+        stats_data = data
+        if autocrop:
+            from processinator.autocrop import autocrop as do_autocrop
+            cropped, crop_info = do_autocrop(data)
+            if any(v > 0 for v in crop_info):
+                import logging
+                logging.getLogger(__name__).info(
+                    "autocrop: stretch stats exclude edges "
+                    "top=%d bottom=%d left=%d right=%d",
+                    *crop_info,
+                )
+                stats_data = cropped
 
-    # Normalize the full image, but compute percentiles from the cropped interior
-    normalized = _normalize_to_01_with_stats(data, stats_data)
+        # Normalize the full image, computing percentiles from the interior
+        normalized = _normalize_to_01_with_stats(data, stats_data)
 
     match algorithm:
         case StretchAlgorithm.MTF:
@@ -84,6 +92,24 @@ def stretch(
             return _stretch_linear(normalized, **kwargs)
         case StretchAlgorithm.STATISTICAL:
             return _stretch_statistical(normalized, **kwargs)
+
+
+def _percentile_pair(
+    arr: NDArray[np.floating], lo: float, hi: float
+) -> tuple[float, float]:
+    """Compute two percentiles of arr in a single partition pass.
+
+    np.percentile with a list of quantiles partitions once for both
+    indices (quickselect), which is roughly twice as fast as two separate
+    calls. nanpercentile is dramatically slower than percentile, so it is
+    used only when NaNs are actually present.
+    """
+    flat = arr.ravel()
+    if np.isnan(flat).any():
+        vmin, vmax = np.nanpercentile(flat, [lo, hi])
+    else:
+        vmin, vmax = np.percentile(flat, [lo, hi])
+    return float(vmin), float(vmax)
 
 
 def _normalize_to_01(data: NDArray[np.floating]) -> NDArray[np.floating]:
@@ -109,8 +135,7 @@ def _normalize_to_01_with_stats(
         for i in range(result.shape[2]):
             ch = result[:, :, i]
             stats_ch = stats_data[:, :, i] if stats_data.ndim == 3 else stats_data
-            vmin = float(np.nanpercentile(stats_ch, 0.1))
-            vmax = float(np.nanpercentile(stats_ch, 99.99))
+            vmin, vmax = _percentile_pair(stats_ch, 0.1, 99.99)
             if vmax - vmin > 0:
                 ch_gpu = from_numpy(ch)
                 result[:, :, i] = to_numpy(xp.clip((ch_gpu - vmin) / (vmax - vmin), 0, 1))
@@ -118,8 +143,7 @@ def _normalize_to_01_with_stats(
                 result[:, :, i] = 0
         return result
 
-    vmin = float(np.nanpercentile(stats_data, 0.1))
-    vmax = float(np.nanpercentile(stats_data, 99.99))
+    vmin, vmax = _percentile_pair(stats_data, 0.1, 99.99)
     if vmax - vmin == 0:
         return np.zeros_like(result)
     r = from_numpy(result)
@@ -340,8 +364,7 @@ def _stretch_linear(
         high_percentile: Upper clipping percentile. Default 99.0.
     """
     # Percentile stays on numpy (JAX doesn't support all percentile modes)
-    vmin = float(np.percentile(data, low_percentile))
-    vmax = float(np.percentile(data, high_percentile))
+    vmin, vmax = _percentile_pair(data, low_percentile, high_percentile)
     if vmax - vmin == 0:
         return data
     d = from_numpy(data)
@@ -372,8 +395,7 @@ def _stretch_statistical(
         high_percentile: White point percentile. Default 99.9.
     """
     # Percentile/median stay on numpy
-    vmin = float(np.percentile(data, low_percentile))
-    vmax = float(np.percentile(data, high_percentile))
+    vmin, vmax = _percentile_pair(data, low_percentile, high_percentile)
     if vmax - vmin == 0:
         return data
 

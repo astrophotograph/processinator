@@ -67,14 +67,14 @@ else:
     xp = np  # type: ignore[assignment]
 
 
-def to_numpy(arr: "NDArray | jnp.ndarray") -> NDArray:  # type: ignore[name-defined]
+def to_numpy(arr: NDArray | jnp.ndarray) -> NDArray:  # type: ignore[name-defined]
     """Convert any array (JAX or numpy) to a plain numpy array."""
     if _USE_JAX:
         return np.asarray(arr)
     return np.asarray(arr)
 
 
-def from_numpy(arr: NDArray) -> "NDArray | jnp.ndarray":  # type: ignore[name-defined]
+def from_numpy(arr: NDArray) -> NDArray | jnp.ndarray:  # type: ignore[name-defined]
     """Convert a numpy array to the active backend's array type."""
     if _USE_JAX:
         return jnp.asarray(arr)
